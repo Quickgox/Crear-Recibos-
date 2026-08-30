@@ -1,4 +1,3 @@
-
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
 import { 
     getAuth, 
@@ -945,4 +944,506 @@ function renderCars() {
                     await deleteDoc(doc(db, 'users', state.currentUser.uid, 'cars', docId));
                 }
                 state.cars.splice(index, 1);
-               
+                renderCars();
+            } catch (err) {
+                console.error("Error eliminando vehículo:", err);
+            }
+        });
+
+    setupCarAutoSaveEvents();
+    setupCarImageUploadEvents();
+}
+
+function setupCarImageUploadEvents() {
+    document.querySelectorAll('.car-image-input').forEach(input => {
+        input.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            const carId = input.getAttribute('data-id');
+
+            if (!file) return;
+
+            if (file.size > 1 * 1024 * 1024) {
+                alert("La imagen es demasiado grande. Elige una foto menor a 1 MB.");
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                const base64Image = event.target.result;
+
+                const carIndex = state.cars.findIndex(c => c.id === carId);
+                if (carIndex !== -1) {
+                    state.cars[carIndex].imageURL = base64Image;
+                }
+
+                try {
+                    if (state.currentUser && carId) {
+                        const carDocRef = doc(db, 'users', state.currentUser.uid, 'cars', carId);
+                        await setDoc(carDocRef, { imageURL: base64Image }, { merge: true });
+                        showCarSaveStatus(carId);
+                    }
+                } catch (err) {
+                    console.error("Error al guardar la imagen en Firestore:", err);
+                    alert("No se pudo guardar la imagen: " + err.message);
+                }
+
+                renderCars();
+            };
+
+            reader.readAsDataURL(file);
+        });
+    });
+}
+
+function setupCarAutoSaveEvents() {
+    document.querySelectorAll('.car-auto-field').forEach(field => {
+        const handler = (e) => {
+            const id = field.getAttribute('data-id');
+            const key = field.getAttribute('data-field');
+            let val = field.value;
+
+            if (key === 'dieselExpense') {
+                val = parseFloat(val) || 0;
+            }
+
+            const carIndex = state.cars.findIndex(c => c.id === id);
+            if (carIndex === -1) return;
+
+            state.cars[carIndex][key] = val;
+
+            if (carAutoSaveTimers[id]) {
+                clearTimeout(carAutoSaveTimers[id]);
+            }
+
+            carAutoSaveTimers[id] = setTimeout(async () => {
+                try {
+                    if (state.currentUser) {
+                        const carDocRef = doc(db, 'users', state.currentUser.uid, 'cars', id);
+                        await setDoc(carDocRef, { [key]: val }, { merge: true });
+                        showCarSaveStatus(id);
+                    }
+                } catch (err) {
+                    console.error("Error al actualizar vehículo en Firestore:", err);
+                }
+            }, 500);
+        };
+
+        field.addEventListener('input', handler);
+        field.addEventListener('change', handler);
+    });
+}
+
+function showCarSaveStatus(id) {
+    const statusEl = document.getElementById(`car-save-status-${id}`);
+    if (statusEl) {
+        statusEl.style.opacity = '1';
+        setTimeout(() => {
+            statusEl.style.opacity = '0';
+        }, 2000);
+    }
+}
+
+// ==========================================
+// CÁLCULO Y GUARDADO DE INVOICES
+// ==========================================
+document.getElementById('calculateInvoiceBtn')?.addEventListener('click', () => {
+    const code = document.getElementById('invCodeInput').value.trim();
+    const loadAmount = parseFloat(document.getElementById('invLoadAmount').value);
+    const incentive = parseFloat(document.getElementById('invIncentive').value) || 0;
+    const deduction = parseFloat(document.getElementById('invDeduction').value) || 0;
+    
+    const incentiveReason = document.getElementById('invIncentiveReason').value.trim() || 'Sin motivo especificado';
+    const deductionReason = document.getElementById('invDeductionReason').value.trim() || 'Sin observaciones';
+
+    if (!code || isNaN(loadAmount) || loadAmount <= 0) {
+        alert('Por favor ingresa un código válido y un monto bruto de carga.');
+        return;
+    }
+
+    const worker = state.personnel.find(p => p.code === code);
+    if (!worker) {
+        alert('Código no encontrado en tu equipo de trabajo.');
+        return;
+    }
+
+    const baseWorkerPay = loadAmount * (worker.percent / 100);
+    const finalWorkerPay = baseWorkerPay + incentive - deduction;
+    const finalOwnerPay = loadAmount - finalWorkerPay;
+
+    state.lastInvoiceCalc = {
+        code: worker.code,
+        workerName: worker.name,
+        workerPercent: worker.percent,
+        loadAmount,
+        baseWorkerPay,
+        incentive,
+        incentiveReason,
+        deduction,
+        deductionReason,
+        finalWorkerPay,
+        finalOwnerPay,
+        createdAt: new Date().toISOString()
+    };
+
+    const ownerDisplayName = state.userProfile?.fullName || state.currentUser?.displayName || 'Propietario';
+
+    document.getElementById('invOutOwner').textContent = ownerDisplayName;
+    document.getElementById('invOutCode').textContent = `COD: ${worker.code}`;
+    document.getElementById('invOutWorkerName').textContent = worker.name;
+    document.getElementById('invOutGross').textContent = `$${loadAmount.toFixed(2)}`;
+    document.getElementById('invOutWorkerPercent').textContent = `${worker.percent}%`;
+    document.getElementById('invOutBasePay').textContent = `$${baseWorkerPay.toFixed(2)}`;
+
+    document.getElementById('invOutIncentive').textContent = `+$${incentive.toFixed(2)}`;
+    document.getElementById('invOutIncentiveReason').textContent = incentiveReason;
+
+    document.getElementById('invOutDeduction').textContent = `-$${deduction.toFixed(2)}`;
+    document.getElementById('invOutDeductionReason').textContent = deductionReason;
+
+    document.getElementById('invOutWorkerPay').textContent = `$${finalWorkerPay.toFixed(2)}`;
+    document.getElementById('invOutOwnerPay').textContent = `$${finalOwnerPay.toFixed(2)}`;
+
+    document.getElementById('invoiceResultContainer').style.display = 'block';
+});
+
+document.getElementById('saveInvoiceToSystemBtn')?.addEventListener('click', async () => {
+    if (!state.currentUser || !state.lastInvoiceCalc) {
+        alert('No hay ninguna factura calculada para guardar.');
+        return;
+    }
+
+    try {
+        const docRef = await addDoc(collection(db, 'users', state.currentUser.uid, 'invoices'), state.lastInvoiceCalc);
+        state.invoices.push({ id: docRef.id, ...state.lastInvoiceCalc });
+        alert('¡Factura guardada exitosamente en la nube!');
+        document.getElementById('invoiceForm')?.reset();
+        document.getElementById('invoiceResultContainer').style.display = 'none';
+        state.lastInvoiceCalc = null;
+        
+        renderInvoices();
+    } catch (err) {
+        alert('Error al guardar la factura: ' + err.message);
+    }
+});
+
+document.getElementById('invoiceSearchCodeInput')?.addEventListener('input', (e) => {
+    invoiceSearchQuery = e.target.value.trim();
+    renderInvoices();
+});
+
+function renderInvoices() {
+    const container = document.getElementById('invoicesAccordionContainer');
+    if (!container) return;
+
+    container.style.cssText = `
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+        width: 100%;
+    `;
+
+    container.innerHTML = '';
+
+    if (!state.invoices || state.invoices.length === 0) {
+        container.innerHTML = `
+            <div style="text-align: center; color: var(--text-muted); padding: 2rem; border: 1px dashed rgba(255,255,255,0.2); border-radius: 12px; width: 100%;">
+                No tienes facturas guardadas en tu cuenta.
+            </div>
+        `;
+        return;
+    }
+
+    let sortedInvoices = [...state.invoices].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    if (invoiceSearchQuery !== '') {
+        sortedInvoices = sortedInvoices.filter(inv => inv.code && inv.code.includes(invoiceSearchQuery));
+    }
+
+    if (sortedInvoices.length === 0) {
+        container.innerHTML = `
+            <div style="text-align: center; color: var(--text-muted); padding: 2rem; border: 1px dashed rgba(255,0,85,0.3); border-radius: 12px; width: 100%;">
+                No se encontraron invoices asociados al código: <strong style="color: var(--neon-red);">${invoiceSearchQuery}</strong>
+            </div>
+        `;
+        return;
+    }
+
+    sortedInvoices.forEach(inv => {
+        const isNegative = inv.finalOwnerPay < 0;
+        const ownerPayColor = isNegative ? '#ff0055' : '#00ff66';
+        const ownerPayGlow = isNegative ? 'rgba(255,0,85,0.4)' : 'rgba(0,255,102,0.3)';
+        const ownerPaySign = isNegative ? '' : '+';
+
+        const card = document.createElement('div');
+        card.className = 'invoice-item-card sync-scroll-card';
+        card.style.cssText = `
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid ${isNegative ? '#ff0055' : 'var(--neon-blue)'};
+            border-radius: 12px;
+            padding: 1.2rem;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+            width: 100%;
+            white-space: nowrap;
+        `;
+
+        card.innerHTML = `
+            <div style="display: inline-flex; align-items: center; gap: 2rem; min-width: max-content;">
+                
+                <!-- 1. TRABAJADOR Y CÓDIGO -->
+                <div style="display: flex; flex-direction: column; min-width: 160px;">
+                    <strong style="color: var(--neon-blue); font-size: 1.1rem; font-family: 'Rajdhani', sans-serif;">
+                        <i class="fa-solid fa-user-check"></i> ${inv.workerName}
+                    </strong>
+                    <span class="code-badge" style="margin-top: 4px; width: fit-content;">COD: ${inv.code}</span>
+                    <span style="font-size: 0.65rem; color: rgba(255,255,255,0.4); margin-top: 4px;">
+                        <i class="fa-regular fa-clock"></i> ${new Date(inv.createdAt).toLocaleDateString()}
+                    </span>
+                </div>
+
+                <!-- 2. MI GANANCIA (PROPIETARIO) -->
+                <div style="text-align: center; border-left: 1px solid rgba(255,255,255,0.1); padding-left: 1.5rem; min-width: 140px;">
+                    <span style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; display: block;">Mi Ganancia</span>
+                    <span style="color: ${ownerPayColor}; font-weight: 900; font-family: 'Orbitron', monospace; font-size: 1.2rem; text-shadow: 0 0 10px ${ownerPayGlow};">
+                        ${ownerPaySign}$${inv.finalOwnerPay.toFixed(2)}
+                    </span>
+                </div>
+
+                <!-- 3. DESGLOSE DE VALORES FINANCIEROS -->
+                <div style="display: flex; gap: 1.2rem; background: rgba(0,0,0,0.3); padding: 0.6rem 1rem; border-radius: 8px; font-size: 0.85rem; border-left: 1px solid rgba(255,255,255,0.1);">
+                    <div><span style="color: var(--text-muted); display:block; font-size:0.7rem;">Carga:</span> <strong style="color: #fff;">$${inv.loadAmount.toFixed(2)}</strong></div>
+                    <div><span style="color: var(--text-muted); display:block; font-size:0.7rem;">Base (${inv.workerPercent}%):</span> <strong style="color: #fff;">$${inv.baseWorkerPay.toFixed(2)}</strong></div>
+                    <div><span style="color: var(--text-muted); display:block; font-size:0.7rem;">Bono:</span> <strong style="color: #00ff66;">+$${inv.incentive.toFixed(2)}</strong></div>
+                    <div><span style="color: var(--text-muted); display:block; font-size:0.7rem;">Descuento:</span> <strong style="color: #ff0055;">-$${inv.deduction.toFixed(2)}</strong></div>
+                    <div><span style="color: var(--text-muted); display:block; font-size:0.7rem;">Pago Chofer:</span> <strong style="color: #00f2ff;">$${inv.finalWorkerPay.toFixed(2)}</strong></div>
+                </div>
+
+                <!-- 4. CAMPOS DE DETALLES Y FORMULARIO CON AUTOGUARDADO -->
+                <div style="display: flex; gap: 1rem; align-items: center; border-left: 1px solid rgba(255,255,255,0.1); padding-left: 1.5rem;">
+                    <div>
+                        <label class="form-label" style="font-size: 0.7rem; margin-bottom: 2px;"><i class="fa-solid fa-location-dot" style="color: var(--neon-blue);"></i> Ciu. Recogida</label>
+                        <input type="text" class="form-control inv-auto-field inv-pickup-city-input" data-id="${inv.id}" data-field="pickupCity" value="${inv.pickupCity || ''}" placeholder="Ej. Miami, FL" style="width: 120px; padding: 4px 8px; font-size: 0.8rem;">
+                    </div>
+                    <div>
+                        <label class="form-label" style="font-size: 0.7rem; margin-bottom: 2px;"><i class="fa-solid fa-flag-checkered" style="color: #00ff66;"></i> Ciu. Entrega</label>
+                        <input type="text" class="form-control inv-auto-field inv-delivery-city-input" data-id="${inv.id}" data-field="deliveryCity" value="${inv.deliveryCity || ''}" placeholder="Ej. Atlanta, GA" style="width: 120px; padding: 4px 8px; font-size: 0.8rem;">
+                    </div>
+                    <div>
+                        <label class="form-label" style="font-size: 0.7rem; margin-bottom: 2px;"><i class="fa-solid fa-calendar-day"></i> Recogida</label>
+                        <input type="date" class="form-control inv-auto-field inv-pickup-input" data-id="${inv.id}" data-field="pickupDate" value="${inv.pickupDate || ''}" style="width: 130px; padding: 4px 8px; font-size: 0.8rem;">
+                    </div>
+                    <div>
+                        <label class="form-label" style="font-size: 0.7rem; margin-bottom: 2px;"><i class="fa-solid fa-calendar-check"></i> Entrega</label>
+                        <input type="date" class="form-control inv-auto-field inv-delivery-input" data-id="${inv.id}" data-field="deliveryDate" value="${inv.deliveryDate || ''}" style="width: 130px; padding: 4px 8px; font-size: 0.8rem;">
+                    </div>
+                    <div>
+                        <label class="form-label" style="font-size: 0.7rem; margin-bottom: 2px;"><i class="fa-solid fa-gas-pump"></i> Diésel ($)</label>
+                        <input type="number" step="0.01" class="form-control inv-auto-field inv-fuel-input" data-id="${inv.id}" data-field="fuelExpense" value="${inv.fuelExpense || ''}" placeholder="Ej. 350.00" style="width: 100px; padding: 4px 8px; font-size: 0.8rem;">
+                    </div>
+                    <div>
+                        <label class="form-label" style="font-size: 0.7rem; margin-bottom: 2px;"><i class="fa-solid fa-truck-ramp-box"></i> Tipo</label>
+                        <select class="form-control inv-auto-field inv-type-select" data-id="${inv.id}" data-field="loadType" style="width: 110px; padding: 4px 8px; font-size: 0.8rem;">
+                            <option value="Dedicada" ${inv.loadType === 'Dedicada' ? 'selected' : ''}>Dedicada</option>
+                            <option value="Parcial" ${inv.loadType === 'Parcial' ? 'selected' : ''}>Parcial</option>
+                        </select>
+                    </div>
+                    
+                    <div id="save-status-${inv.id}" style="font-size: 0.75rem; color: #00ff66; font-weight: bold; min-width: 90px; opacity: 0; transition: opacity 0.3s ease; margin-left: 10px;">
+                        <i class="fa-solid fa-cloud-arrow-up"></i> Guardado
+                    </div>
+                </div>
+
+            </div>
+        `;
+        container.appendChild(card);
+    });
+
+    setupInvoiceDetailEvents();
+    setupSyncedScroll();
+}
+
+function setupSyncedScroll() {
+    const cards = document.querySelectorAll('.sync-scroll-card');
+    if (cards.length === 0) return;
+
+    let activeCard = null;
+
+    cards.forEach(card => {
+        card.addEventListener('mouseenter', () => { activeCard = card; });
+        card.addEventListener('touchstart', () => { activeCard = card; });
+
+        card.addEventListener('scroll', () => {
+            if (activeCard !== card) return;
+
+            const currentScrollLeft = card.scrollLeft;
+
+            cards.forEach(otherCard => {
+                if (otherCard !== card) {
+                    otherCard.scrollLeft = currentScrollLeft;
+                }
+            });
+        });
+
+        card.addEventListener('wheel', (evt) => {
+            if (evt.deltaY !== 0) {
+                evt.preventDefault();
+                card.scrollLeft += evt.deltaY;
+            }
+        }, { passive: false });
+    });
+}
+
+function showAutoSaveStatus(id) {
+    const statusEl = document.getElementById(`save-status-${id}`);
+    if (statusEl) {
+        statusEl.style.opacity = '1';
+        setTimeout(() => {
+            statusEl.style.opacity = '0';
+        }, 2000);
+    }
+}
+
+// ==========================================
+// AUTOGUARDADO DE CAMPOS DE INVOICE EN FIRESTORE
+// ==========================================
+function setupInvoiceDetailEvents() {
+    document.querySelectorAll('.inv-auto-field').forEach(field => {
+        const handler = (e) => {
+            const id = field.getAttribute('data-id');
+            const key = field.getAttribute('data-field');
+            let val = field.value;
+
+            if (key === 'fuelExpense') {
+                val = parseFloat(val) || 0;
+            }
+
+            const invIndex = state.invoices.findIndex(i => i.id === id);
+            if (invIndex === -1) return;
+
+            state.invoices[invIndex][key] = val;
+
+            if (autoSaveDebounceTimers[id]) {
+                clearTimeout(autoSaveDebounceTimers[id]);
+            }
+
+            autoSaveDebounceTimers[id] = setTimeout(async () => {
+                try {
+                    if (state.currentUser) {
+                        const invDocRef = doc(db, 'users', state.currentUser.uid, 'invoices', id);
+                        await setDoc(invDocRef, { [key]: val }, { merge: true });
+                        showAutoSaveStatus(id);
+                    }
+                } catch (err) {
+                    console.error("Error al guardar campo en Firestore:", err);
+                }
+            }, 500);
+        };
+
+        field.addEventListener('input', handler);
+        field.addEventListener('change', handler);
+    });
+}
+
+function setupTogglePassword(btnId, inputId) {
+    document.getElementById(btnId)?.addEventListener('click', () => {
+        const field = document.getElementById(inputId);
+        if (field) field.type = field.type === 'password' ? 'text' : 'password';
+    });
+}
+setupTogglePassword('toggleLoginPassword', 'loginPassword');
+setupTogglePassword('toggleRegPassword', 'regPassword');
+
+// ==========================================
+// LÓGICA Y FUNCIONALIDAD DE CALCULADORA FLOTANTE
+// ==========================================
+const floatingCalc = document.getElementById('floatingCalc');
+const calcHeader = document.getElementById('calcHeader');
+const calcBody = document.getElementById('calcBody');
+const calcDisplay = document.getElementById('calcDisplay');
+const linkFloatingCalc = document.getElementById('linkFloatingCalc');
+const closeCalcBtn = document.getElementById('closeCalcBtn');
+const minimizeCalcBtn = document.getElementById('minimizeCalcBtn');
+
+// 1. Mostrar Calculadora desde el Menú
+linkFloatingCalc?.addEventListener('click', (e) => {
+    e.preventDefault();
+    floatingCalc.classList.add('active');
+    if (typeof toggleDrawer === 'function' && document.getElementById('sideDrawer')?.classList.contains('open')) {
+        toggleDrawer();
+    }
+});
+
+// 2. Cerrar y Minimizar
+closeCalcBtn?.addEventListener('click', () => {
+    floatingCalc.classList.remove('active');
+});
+
+minimizeCalcBtn?.addEventListener('click', () => {
+    calcBody.classList.toggle('minimized');
+});
+
+// 3. Ventana Arrastrable (Drag and Drop)
+let isDragging = false;
+let offsetX = 0, offsetY = 0;
+
+calcHeader?.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    offsetX = e.clientX - floatingCalc.offsetLeft;
+    offsetY = e.clientY - floatingCalc.offsetTop;
+});
+
+document.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    floatingCalc.style.left = `${e.clientX - offsetX}px`;
+    floatingCalc.style.top = `${e.clientY - offsetY}px`;
+    floatingCalc.style.right = 'auto';
+});
+
+document.addEventListener('mouseup', () => {
+    isDragging = false;
+});
+
+// Soporte táctil para pantallas móviles
+calcHeader?.addEventListener('touchstart', (e) => {
+    isDragging = true;
+    const touch = e.touches[0];
+    offsetX = touch.clientX - floatingCalc.offsetLeft;
+    offsetY = touch.clientY - floatingCalc.offsetTop;
+});
+
+document.addEventListener('touchmove', (e) => {
+    if (!isDragging) return;
+    const touch = e.touches[0];
+    floatingCalc.style.left = `${touch.clientX - offsetX}px`;
+    floatingCalc.style.top = `${touch.clientY - offsetY}px`;
+    floatingCalc.style.right = 'auto';
+});
+
+document.addEventListener('touchend', () => {
+    isDragging = false;
+});
+
+// 4. Lógica de Operaciones de la Calculadora
+document.querySelectorAll('.calc-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const val = btn.getAttribute('data-val');
+        const action = btn.getAttribute('data-action');
+
+        if (val !== null) {
+            if (calcDisplay.value === '0' || calcDisplay.value === 'Error') {
+                calcDisplay.value = val;
+            } else {
+                calcDisplay.value += val;
+            }
+        } else if (action === 'clear') {
+            calcDisplay.value = '0';
+        } else if (action === 'backspace') {
+            calcDisplay.value = calcDisplay.value.slice(0, -1) || '0';
+        } else if (action === 'calculate') {
+            try {
+                calcDisplay.value = Function(`'use strict'; return (${calcDisplay.value})`)();
+            } catch (err) {
+                calcDisplay.value = 'Error';
+            }
+        }
+    });
+});
